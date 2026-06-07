@@ -1,5 +1,6 @@
 const Gig = require("../models/Gig");
 const Freelancer = require("../models/Freelancer");
+const Client = require("../models/Client");
 const User = require("../models/User");
 const aiMatchingService = require("../services/aiMatchingService");
 
@@ -86,7 +87,7 @@ exports.getMatchedFreelancersForGig = async (req, res) => {
                 name: r.freelancer.userId?.name || "Unknown",
                 email: r.freelancer.userId?.email || "",
                 title: r.freelancer.title || "",
-                skills: r.freelancer.skills || [],
+                skills: (r.freelancer.skills || []).map(s => typeof s === "object" ? s.name : s),
                 rating: r.freelancer.rating || 0,
                 hourlyRate: r.freelancer.hourlyRate || 0,
                 location: r.freelancer.location || "",
@@ -271,15 +272,110 @@ exports.getTrendingSkills = async (req, res) => {
 };
 
 /**
+ * GET /api/matching/client
+ * Returns freelancer recommendations for the logged-in client.
+ * Uses the client's hiring preferences / preferred skills for AI matching.
+ */
+exports.getRecommendedFreelancersForClient = async (req, res) => {
+    try {
+        const { id: userId } = req.user;
+        const limit = parseInt(req.query.limit) || 10;
+
+        const client = await Client.findOne({ userId }).lean();
+        if (!client) {
+            return res.status(404).json({ msg: "Client profile not found. Please complete your profile first." });
+        }
+
+        const clientSkills = client.hiringPreferences?.preferredSkills || [];
+        if (clientSkills.length === 0) {
+            return res.json({ matches: [], message: "Add preferred skills to your hiring preferences to get AI-powered freelancer recommendations." });
+        }
+
+        const freelancers = await Freelancer.find({ availability: { $ne: "unavailable" } })
+            .populate("userId", "name email")
+            .lean();
+
+        if (freelancers.length === 0) {
+            return res.json({ matches: [], message: "No available freelancers found." });
+        }
+
+        const scoringPromises = freelancers.map(async (freelancer) => {
+            const freelancerSkills = freelancer.skills || [];
+            if (freelancerSkills.length === 0) {
+                return { freelancer, score: 0, skillSimilarity: 0, matchPercent: 0 };
+            }
+
+            const { score, skillSimilarity } = await aiMatchingService.scoreFreelancer(
+                clientSkills,
+                freelancerSkills,
+                freelancer.rating || 0
+            );
+
+            let locationBonus = 0;
+            if (client.location && freelancer.location &&
+                freelancer.location.toLowerCase().includes(client.location.toLowerCase())) {
+                locationBonus = 0.05;
+            }
+
+            const finalScore = Math.min(score + locationBonus, 1);
+
+            return {
+                freelancer,
+                score: finalScore,
+                skillSimilarity,
+                matchPercent: Math.round(finalScore * 100),
+                locationMatch: locationBonus > 0,
+            };
+        });
+
+        const results = await Promise.all(scoringPromises);
+
+        const topMatches = results
+            .filter((r) => r.score > 0)
+            .sort((a, b) => b.score - a.score)
+            .slice(0, limit)
+            .map((r) => ({
+                freelancerId: r.freelancer._id,
+                userId: r.freelancer.userId?._id,
+                name: r.freelancer.userId?.name || "Unknown",
+                email: r.freelancer.userId?.email || "",
+                title: r.freelancer.title || "",
+                skills: (r.freelancer.skills || []).map(s => typeof s === "object" ? s.name : s),
+                rating: r.freelancer.rating || 0,
+                hourlyRate: r.freelancer.hourlyRate || 0,
+                location: r.freelancer.location || "",
+                availability: r.freelancer.availability,
+                verifiedStatus: r.freelancer.verifiedStatus,
+                score: r.score,
+                matchPercent: r.matchPercent,
+                skillSimilarity: r.skillSimilarity,
+                locationMatch: r.locationMatch,
+            }));
+
+        res.json({
+            clientSkills,
+            totalFreelancers: freelancers.length,
+            matches: topMatches,
+        });
+    } catch (err) {
+        console.error("Client AI Matching Error:", err);
+        res.status(500).json({ error: err.message });
+    }
+};
+
+/**
  * GET /api/matching/status
- * Returns the current AI model status (loaded / loading / not loaded).
+ * Returns the current AI model status (operational / fallback / error).
  */
 exports.getAIStatus = async (req, res) => {
     try {
+        const active = aiMatchingService.isAIActive();
         res.json({
-            status: "operational",
+            status: active ? "operational" : "fallback",
             model: "Xenova/all-MiniLM-L6-v2",
-            description: "Skill similarity scoring via HuggingFace Transformers (local inference)",
+            description: active
+                ? "Skill similarity scoring via HuggingFace Transformers (local inference)"
+                : "Keyword-based matching (HuggingFace model unavailable)",
         });
     } catch (err) {
         res.status(500).json({ error: err.message });

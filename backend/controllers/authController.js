@@ -1,4 +1,6 @@
 const User = require("../models/User");
+const Client = require("../models/Client");
+const Freelancer = require("../models/Freelancer");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
@@ -125,6 +127,13 @@ exports.register = async (req, res) => {
             emailVerificationToken: emailVerificationToken,
             isEmailVerified: skipVerification
         });
+
+        // Auto-create role-specific profile
+        if (user.role === "client") {
+            await Client.create({ userId: user._id, title: name });
+        } else if (user.role === "freelancer") {
+            await Freelancer.create({ userId: user._id });
+        }
 
         // Send verification email only for users who need it
         let verificationEmailSent = true;
@@ -274,6 +283,7 @@ exports.googleAuth = async (req, res) => {
                     isEmailVerified: true,
                     role: "client"
                 });
+                await Client.create({ userId: user._id, title: name });
             }
         }
 
