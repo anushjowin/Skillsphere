@@ -17,4 +17,7 @@ router.get("/gig/:gigId", authMiddleware, matchingController.getMatchedFreelance
 // GET /api/matching/freelancer — Personalized gig recommendations (freelancers)
 router.get("/freelancer", authMiddleware, matchingController.getRecommendedGigsForFreelancer);
 
+// GET /api/matching/client — Freelancer recommendations for clients (by hiring preferences)
+router.get("/client", authMiddleware, matchingController.getRecommendedFreelancersForClient);
+
 module.exports = router;

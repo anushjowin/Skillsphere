@@ -1,28 +1,33 @@
 /**
  * AI Matching Service
- * Uses HuggingFace's all-MiniLM-L6-v2 model via @xenova/transformers
- * to compute skill similarity scores between gigs and freelancers.
+ * Uses HuggingFace's all-MiniLM-L6-v2 model to compute skill similarity
+ * scores between gigs and freelancers.
  *
  * The model (~25MB) is downloaded from HuggingFace CDN on first use
  * and cached to disk automatically. No API key required.
+ *
+ * Falls back to keyword-based matching if the HuggingFace model
+ * fails to load or produce results.
  */
 
 let pipeline = null;
 let pipelineLoading = false;
 let pipelineReady = false;
+let aiDisabled = false;
 
 /**
  * Lazy-load the feature-extraction pipeline (singleton).
  * Safe to call multiple times — only loads once.
+ * Falls back gracefully if the model cannot be loaded.
  */
 async function getPipeline() {
     if (pipelineReady) return pipeline;
+    if (aiDisabled) return null;
 
     if (pipelineLoading) {
-        // Wait until the in-progress load finishes
         await new Promise((resolve) => {
             const interval = setInterval(() => {
-                if (pipelineReady) {
+                if (pipelineReady || aiDisabled) {
                     clearInterval(interval);
                     resolve();
                 }
@@ -36,15 +41,15 @@ async function getPipeline() {
     console.log("🤖 [AI] First run: model will download ~25MB from HuggingFace CDN.");
 
     try {
-        // Dynamic import to stay compatible with CommonJS
-        const { pipeline: hfPipeline } = await import("@xenova/transformers");
+        const { pipeline: hfPipeline } = await import("@huggingface/transformers");
         pipeline = await hfPipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2");
         pipelineReady = true;
         console.log("🤖 [AI] Model loaded and ready ✅");
     } catch (err) {
         pipelineLoading = false;
+        aiDisabled = true;
         console.error("🤖 [AI] Failed to load model:", err.message);
-        throw err;
+        console.log("🤖 [AI] Falling back to keyword-based matching.");
     }
 
     return pipeline;
@@ -53,15 +58,36 @@ async function getPipeline() {
 /**
  * Embed an array of text strings into float vectors.
  * Returns: float32 matrix [ [vec1...], [vec2...], ... ]
+ * Falls back to one-hot-style vectors when the AI model is unavailable.
  */
 async function embedTexts(texts) {
     if (!texts || texts.length === 0) return [];
     const extractor = await getPipeline();
-    const results = [];
 
+    // Fallback: return simple keyword-based fingerprint vectors
+    if (!extractor) {
+        return texts.map(text => {
+            const vec = new Array(100).fill(0);
+            let hash = 0;
+            for (let i = 0; i < text.length; i++) {
+                hash = ((hash << 5) - hash) + text.charCodeAt(i);
+                vec[Math.abs(hash) % 100] += 1;
+            }
+            const norm = Math.sqrt(vec.reduce((s, v) => s + v * v, 0)) || 1;
+            return vec.map(v => v / norm);
+        });
+    }
+
+    const results = [];
     for (const text of texts) {
-        const output = await extractor(text, { pooling: "mean", normalize: true });
-        results.push(Array.from(output.data));
+        try {
+            const output = await extractor(text, { pooling: "mean", normalize: true });
+            results.push(Array.from(output.data));
+        } catch (err) {
+            console.warn("🤖 [AI] Embedding failed for text, using fallback:", text, err.message);
+            const vec = new Array(384).fill(0);
+            results.push(vec);
+        }
     }
 
     return results;
@@ -154,6 +180,10 @@ async function warmUp() {
     }
 }
 
+function isAIActive() {
+    return pipelineReady;
+}
+
 module.exports = {
     embedTexts,
     embedSkillSet,
@@ -161,4 +191,5 @@ module.exports = {
     scoreFreelancer,
     scoreGig,
     warmUp,
+    isAIActive,
 };
